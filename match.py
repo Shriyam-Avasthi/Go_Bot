@@ -148,7 +148,7 @@ def main():
 
     dir_save = 'game/images'
 
-    match = Match(agent_black=agent_black, agent_white=agent_white, dir_save=dir_save)
+    match = Match(agent_black=agent_black, agent_white=agent_white, dir_save=None)
 
     print('Match starts!')
     match.start()
