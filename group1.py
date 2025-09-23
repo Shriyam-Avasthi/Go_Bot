@@ -42,7 +42,7 @@ class BoardSnapshot:
     but stores copies of their mutable internals so the snapshot
     is delinked from future mutations.
     """
-    def __init__(self, board: Board):
+    def __init__(self, board: Board, shadow_pool: dict):
         # cheap scalars
         self.next = board.next
         self.winner = board.winner
@@ -56,9 +56,20 @@ class BoardSnapshot:
         self.endangered = board.endangered_groups[:]
         self.removed = board.removed_groups[:]
 
+        self.group_shadows = {}
         # per-group saved internals
-        self.group_shadows = {g: GroupShadow(g) for g in (self.groups_black + self.groups_white)}
-
+        for g in (self.groups_black + self.groups_white):
+            if g in shadow_pool:
+                shadow = shadow_pool[g]
+                # update the shadow with current values instead of creating new
+                shadow.points[:] = list(g.points)
+                shadow.liberties.clear()
+                shadow.liberties.update(list(g.liberties))
+            else:
+                shadow = GroupShadow(g)
+                if shadow_pool is not None:
+                    shadow_pool[g] = shadow
+            self.group_shadows[g] = shadow
         # snapshot point-dicts: mapping point -> list(of original Group refs)
         self.stonedict = {'BLACK': {}, 'WHITE': {}}
         self.libertydict = {'BLACK': {}, 'WHITE': {}}
@@ -116,7 +127,9 @@ class Agent1v1:
         self.verbose = verbose
 
         self._snap_stack = [BoardSnapshot.__new__(BoardSnapshot)
-                            for _ in range(self.MAX_DEPTH + 1)]
+                            for _ in range(self.MAX_DEPTH + 2)]
+        
+        self._shadow_pools = [{} for _ in range(self.MAX_DEPTH + 2)]
 
     def evaluate(self, board: Board) -> int:
         if(board.winner is not None):
@@ -135,8 +148,9 @@ class Agent1v1:
             return 0,1
 
         snap = self._snap_stack[depth]
-        snap.__init__(board)        
-        
+        shadow_pool = self._shadow_pools[depth]
+        snap.__init__(board, shadow_pool)
+
         if(maximizing_player):
             max_score = -1e9
             for action in board.legal_actions:
@@ -152,7 +166,6 @@ class Agent1v1:
         
         else:
             min_score = 1e9
-            snap = BoardSnapshot(board)
             for action in board.legal_actions:
                 board.put_stone(action, check_legal=False)
                 # successor = board.copy()
@@ -170,7 +183,10 @@ class Agent1v1:
         best_action = None
         # print(f"Legal Actions: {board.legal_actions}")
         # self.print_point_dict(board.libertydict)
-        snap = BoardSnapshot(board)
+        snap = self._snap_stack[-1]
+        snap = self._snap_stack[-1]
+        snap.__init__(board, self._shadow_pools[-1]) 
+
         for action in board.legal_actions:
             
             # print("STORED_______________________")
