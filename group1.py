@@ -7,6 +7,8 @@ from game.util import PointDict
 from copy import deepcopy
 import time
 
+import random
+
 class Agent1:
     """A class to generate a random action for a Go board."""
 
@@ -24,6 +26,28 @@ class Agent1:
         if actions:
             return random.choice(actions)
         return None
+    
+#########################################################################################################################
+def make_zobrist(board_size: int, seed: int = 0) -> list[list[list[int]]]:
+    """
+    Returns a table [x][y][color] -> random 64-bit int.
+    color: 0 = BLACK, 1 = WHITE
+    """
+    rnd = random.Random(seed)
+    return [[[rnd.getrandbits(64) for _ in range(2)]
+             for _ in range(board_size)]
+             for _ in range(board_size)]
+
+def board_hash(board, zobrist) -> int:
+    h = 0
+    for p in board.stonedict.d['BLACK']:
+        x, y = p  
+        h ^= zobrist[x][y][0]
+    for p in board.stonedict.d['WHITE']:
+        x, y = p
+        h ^= zobrist[x][y][1]
+    return h
+
 
 class GroupShadow:
     """Store only the mutable fields of a Group (cheap)."""
@@ -113,6 +137,159 @@ def restore(board: Board, snap: BoardSnapshot):
         board.libertydict.d[color].clear()
         for p, groups in snap.libertydict[color].items():
             board.libertydict.d[color][p] = groups[:]
+
+class Agent1v2:
+    """A class to generate a random action for a Go board."""
+    def __init__(self, color, verbose = False):
+        self.color = color
+        self.opponent_color = opponent_color(self.color)
+        self.MAX_DEPTH = 4
+
+        self.W_LIBERTIES = 10
+        self.W_ATARI = 40
+        self.W_WIN = 1e5
+        self.verbose = verbose
+
+        self._snap_stack = [BoardSnapshot.__new__(BoardSnapshot)
+                            for _ in range(self.MAX_DEPTH + 2)]
+        
+        self._shadow_pools = [{} for _ in range(self.MAX_DEPTH + 2)]
+
+        self.zobrist = make_zobrist(board_size=20)
+        self.transposition = {}   
+
+    def evaluate(self, board: Board) -> int:
+        if(board.winner is not None):
+            if(board.winner == self.color): return self.W_WIN
+            else: return -self.W_WIN
+        score = 0
+        score += self.W_LIBERTIES * (len(board.libertydict.d[self.color]) - len(board.libertydict.d[self.opponent_color]))
+        return score
+
+    def minimax(self, board: Board, depth: int, maximizing_player: bool, hash: int) -> int:  
+        color_idx = 0 if board.next == 'BLACK' else 1
+        key = (hash, color_idx)
+        
+        if(key in self.transposition):
+            return self.transposition[key]
+        
+        pos = 0   
+        if((depth == 0) or (board.winner is not None)):
+            score = self.evaluate(board)
+            self.transposition[key] = (score,1)
+            return score,1
+
+        if(len(board.legal_actions) == 0): 
+            return 0,1
+        
+        snap = self._snap_stack[depth]
+        shadow_pool = self._shadow_pools[depth]
+        snap.__init__(board, shadow_pool)
+
+        if(maximizing_player):
+            max_score = -1e9
+            for action in board.legal_actions:
+                x, y = action
+                new_h = hash ^ self.zobrist[x][y][color_idx]
+                board.put_stone(action, check_legal=False)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, False)
+                score, new_pos = self.minimax(board, depth-1, False, new_h)
+                max_score = max(max_score, score)
+                pos += new_pos
+                restore(board, snap)
+            self.transposition[key] = (max_score, pos)
+            return max_score, pos
+        
+        else:
+            min_score = 1e9
+            for action in board.legal_actions:
+                x, y = action
+                new_h = hash ^ self.zobrist[x][y][color_idx]
+                board.put_stone(action, check_legal=False)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, True)
+                score, new_pos = self.minimax(board, depth-1, True, new_h)
+                min_score = min(min_score, score)
+                pos += new_pos
+                restore(board, snap)
+            self.transposition[key] = (min_score, pos)
+            return min_score, pos
+
+    def get_best_action(self, board: Board, depth: int):
+        pos = 0
+        best_score = -1e9
+        best_action = None
+
+        self.transposition.clear()
+        # print(f"Legal Actions: {board.legal_actions}")
+        # self.print_point_dict(board.libertydict)
+        snap = self._snap_stack[-1]
+        snap = self._snap_stack[-1]
+        snap.__init__(board, self._shadow_pools[-1]) 
+        initial_hash = board_hash(board, self.zobrist)
+
+        for action in board.legal_actions:
+            x, y = action
+            color_idx = 0 if board.next == 'BLACK' else 1
+            new_h = initial_hash ^ self.zobrist[x][y][color_idx]
+            # print("STORED_______________________")
+            # for key,val in snap.libertydict['BLACK'].items(): 
+            #     print(key , val)
+        
+            # for key,val in snap.libertydict['WHITE'].items(): 
+            #     print(key , val)
+            # print()
+
+            board.put_stone(action, check_legal=False)
+            # successor = board.copy()
+            # successor.put_stone(action, check_legal=False)
+            # score, new_pos = self.minimax(successor, depth, maximizing_player=False)
+            # self.print_point_dict(board.libertydict)
+            score, new_pos = self.minimax(board, depth, maximizing_player=False, hash=new_h)
+            pos += new_pos
+            if(score > best_score):
+                best_score = score
+                best_action = action
+            
+            restore(board, snap)
+            # print("RESTORED: ")
+            # self.print_point_dict(board.libertydict)
+        return best_action, pos
+
+    def print_point_dict(self, point_dict:PointDict):
+        for key,val in point_dict.d['BLACK'].items(): 
+            print(key , val)
+        
+        for key,val in point_dict.d['WHITE'].items(): 
+            print(key , val)
+        print()
+
+    def get_action(self, board: Board):
+        """
+        Returns a random legal action from the board.
+
+        :param board: The current Go board state.
+        :return: A random legal action (tuple) or None if no actions are available.
+        """
+        start_time = time.time()
+        actions = board.legal_actions
+        if actions:
+            best_action, pos = self.get_best_action(board, self.MAX_DEPTH)
+            # print("BEST ACTION: ", best_action, board.next)
+            if(self.verbose):
+                print(f"Decision Time: {time.time() - start_time}")
+                print(f"Possibilities considered: {pos}")
+
+            if(time.time() - start_time > 10): 
+                print(f"Took too much time: {time.time() - start_time}")
+                print(f"Possibilities considered: {pos}")
+                print(board.legal_actions)
+            return best_action
+        return None
+###########################################################################################################################
 
 class Agent1v1:
     """A class to generate a random action for a Go board."""
