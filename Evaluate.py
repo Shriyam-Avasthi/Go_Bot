@@ -143,13 +143,13 @@ class Match:
 
 def main():
 
-    SAMPLE_SIZE = 10
+    SAMPLE_SIZE = 100
     black_wins = 0
     white_wins = 0
     draws = 0
     for i in tqdm(range(SAMPLE_SIZE), desc="Progress: ", unit="matches"):
-        agent_black = Agent1('BLACK')
-        agent_white = None #Agent2('WHITE')
+        agent_white = Agent2('WHITE')
+        agent_black = Agent1('BLACK', verbose=(agent_white is None))
 
         match = Match(agent_black=agent_black, agent_white=agent_white, gui=False, dir_save=None)
 
