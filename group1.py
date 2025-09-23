@@ -20,7 +20,7 @@ class Agent1:
         :param board: The current Go board state.
         :return: A random legal action (tuple) or None if no actions are available.
         """
-        actions = board.get_legal_actions()
+        actions = board.legal_actions
         if actions:
             return random.choice(actions)
         return None
@@ -107,6 +107,7 @@ class Agent1v1:
     """A class to generate a random action for a Go board."""
     def __init__(self, color, verbose = False):
         self.color = color
+        self.opponent_color = opponent_color(self.color)
         self.MAX_DEPTH = 3
 
         self.W_LIBERTIES = 10
@@ -114,12 +115,15 @@ class Agent1v1:
         self.W_WIN = 1e5
         self.verbose = verbose
 
+        self._snap_stack = [BoardSnapshot.__new__(BoardSnapshot)
+                            for _ in range(self.MAX_DEPTH + 1)]
+
     def evaluate(self, board: Board) -> int:
         if(board.winner is not None):
             if(board.winner == self.color): return self.W_WIN
             else: return -self.W_WIN
         score = 0
-        score += self.W_LIBERTIES * (len(board.libertydict.d[self.color]) - len(board.libertydict.d[opponent_color(self.color)]))
+        score += self.W_LIBERTIES * (len(board.libertydict.d[self.color]) - len(board.libertydict.d[self.opponent_color]))
         return score
 
     def minimax(self, board: Board, depth: int, maximizing_player: bool) -> int:  
@@ -127,13 +131,15 @@ class Agent1v1:
         if((depth == 0) or (board.winner is not None)):
             return self.evaluate(board),1
 
-        if(len(board.get_legal_actions()) == 0): 
+        if(len(board.legal_actions) == 0): 
             return 0,1
 
-        snap = BoardSnapshot(board)
+        snap = self._snap_stack[depth]
+        snap.__init__(board)        
+        
         if(maximizing_player):
             max_score = -1e9
-            for action in board.get_legal_actions():
+            for action in board.legal_actions:
                 board.put_stone(action, check_legal=False)
                 # successor = board.copy()
                 # successor.put_stone(action, check_legal=False)
@@ -147,7 +153,7 @@ class Agent1v1:
         else:
             min_score = 1e9
             snap = BoardSnapshot(board)
-            for action in board.get_legal_actions():
+            for action in board.legal_actions:
                 board.put_stone(action, check_legal=False)
                 # successor = board.copy()
                 # successor.put_stone(action, check_legal=False)
@@ -162,10 +168,10 @@ class Agent1v1:
         pos = 0
         best_score = -1e9
         best_action = None
-        # print(f"Legal Actions: {board.get_legal_actions()}")
+        # print(f"Legal Actions: {board.legal_actions}")
         # self.print_point_dict(board.libertydict)
         snap = BoardSnapshot(board)
-        for action in board.get_legal_actions():
+        for action in board.legal_actions:
             
             # print("STORED_______________________")
             # for key,val in snap.libertydict['BLACK'].items(): 
@@ -209,7 +215,7 @@ class Agent1v1:
         :return: A random legal action (tuple) or None if no actions are available.
         """
         start_time = time.time()
-        actions = board.get_legal_actions()
+        actions = board.legal_actions
         if actions:
             best_action = self.get_best_action(board, self.MAX_DEPTH)
             # print("BEST ACTION: ", best_action, board.next)

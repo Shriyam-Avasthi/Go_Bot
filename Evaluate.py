@@ -148,7 +148,7 @@ def main():
     white_wins = 0
     draws = 0
     for i in tqdm(range(SAMPLE_SIZE), desc="Progress: ", unit="matches"):
-        agent_white = Agent2('WHITE')
+        agent_white = None #Agent2('WHITE')
         agent_black = Agent1('BLACK', verbose=(agent_white is None))
 
         match = Match(agent_black=agent_black, agent_white=agent_white, gui=False, dir_save=None)
