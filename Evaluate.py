@@ -3,7 +3,7 @@ from game.go import Board, opponent_color
 from game.ui import UI
 import pygame
 import time
-from group1 import Agent1v2, Agent1v1
+from group1 import Agent1v3, Agent1v2, Agent1v1
 from group2 import Agent2
 from os.path import join
 from argparse import ArgumentParser
@@ -148,8 +148,8 @@ def main():
     white_wins = 0
     draws = 0
     for i in tqdm(range(SAMPLE_SIZE), desc="Progress: ", unit="matches"):
-        agent_white = None #Agent1v1('WHITE')
-        agent_black = Agent1v2('BLACK', verbose=(agent_white is None))
+        agent_white = Agent2('WHITE')
+        agent_black = Agent1v3('BLACK', verbose=(agent_white is not None))
 
         match = Match(agent_black=agent_black, agent_white=agent_white, gui=True, dir_save=None)
 

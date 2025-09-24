@@ -2,10 +2,11 @@
 
 from game.go import Board
 import random
-from game.go import opponent_color
+from game.go import opponent_color, BOARD_SIZE
 from game.util import PointDict
 from copy import deepcopy
 import time
+import numpy as np
 
 import random
 
@@ -48,6 +49,313 @@ def board_hash(board, zobrist) -> int:
         h ^= zobrist[x][y][1]
     return h
 
+class LightweightBoardHandler():
+    def __init__(self, board: Board):
+        self.EMPTY = 0
+        self.BLACK = 1
+        self.WHITE = -1
+        self.parent = {}
+        self.group_data = {}
+        self.winner = None
+        self.draw = False
+        self.next = self.BLACK if board.next == 'BLACK' else self.WHITE
+
+        self.possible_actions = {self.BLACK: set() ,self.WHITE: set()}
+        self.endangered_groups = {self.BLACK: set(),self.WHITE: set()}
+        self.board = np.zeros((BOARD_SIZE, BOARD_SIZE), np.int8)
+        self.undo_stack: list[tuple] = []
+
+        self.zobrist = make_zobrist(board_size=BOARD_SIZE)
+        self.hash = 0
+        
+        for point, groups in board.stonedict.d["BLACK"].items():
+            if groups: 
+                self.put_stone(point, self.BLACK)
+                self.hash ^= self.zobrist[point[0]][point[1]][1]
+        for point,groups in board.stonedict.d["WHITE"].items():
+            if groups: 
+                self.put_stone(point, self.WHITE)
+                self.hash ^= self.zobrist[point[0]][point[1]][0]
+
+    def find_root(self, point: tuple[int,int]):
+        if(self.parent[point] == point): return point
+        self.parent[point] = self.find_root(self.parent[point])        
+        return self.parent[point]
+    
+    def union(self, point1: tuple[int,int], point2: tuple[int,int]):
+        root1 = self.find_root(point1)
+        root2 = self.find_root(point2)
+        if root1 != root2:
+            if self.group_data[root1]['stones'] < self.group_data[root2]['stones']:
+                root1, root2 = root2, root1
+
+            self.parent[root2] = root1
+
+            self.endangered_groups[self.board[root1]].discard(root1)
+            self.endangered_groups[self.board[root2]].discard(root2)
+
+            self.group_data[root1]['stones'] += self.group_data[root2]['stones']
+            self.group_data[root1]['liberties'].update(self.group_data[root2]['liberties'])
+            
+            del self.group_data[root2]
+    
+    def get_opponent(self, color: int):
+        return 1 if color==-1 else -1
+
+    def put_stone(self, point: tuple[int,int], color: int):
+        self.board[point] = color
+        self.parent[point] = point
+        self.group_data[point] = {'liberties' : set(), 'stones': 1}
+        dirs = {(0,1), (0,-1), (1,0), (-1,0)}
+        
+        liberties = []
+        for dir in dirs:
+            x = point[0] + dir[0]
+            y = point[1] + dir[1]
+
+            if((1 <= x < BOARD_SIZE) and (1 <= y < BOARD_SIZE)):
+                if(self.board[(x,y)] == color):
+                    self.union((x,y), point)
+                    self.group_data[self.find_root(point)]['liberties'].discard(point)
+                elif(self.board[(x,y)] == self.get_opponent(color)):
+                    opp_root = self.find_root((x,y))
+                    opp_group = self.group_data[opp_root]
+                    opp_group['liberties'].discard(point)
+                    remaining_liberties = len(opp_group['liberties'])
+                    if remaining_liberties == 1: 
+                        self.endangered_groups[self.get_opponent(color)].add(opp_root)
+                    elif remaining_liberties == 0: 
+                        self.winner = color
+                else:
+                    liberties.append((x,y))
+        final_root = self.find_root(point)
+        final_group = self.group_data[final_root]
+        final_group['liberties'].update(liberties)
+
+        self.possible_actions[self.BLACK].discard(point)
+        self.possible_actions[self.WHITE].discard(point)
+
+        self.possible_actions[self.get_opponent(color)].update(liberties)
+        remaining_liberties = len(final_group['liberties'])
+        if remaining_liberties == 1: 
+            self.endangered_groups[color].update([final_root])
+        elif remaining_liberties == 0: 
+            self.winner = self.get_opponent(color)
+
+        if(self.possible_actions[self.WHITE] == self.possible_actions[self.BLACK] == set()): self.draw = True
+
+    def get_legal_actions(self):
+        opponent = self.get_opponent(self.next)
+        if self.endangered_groups[opponent]:
+            capture_moves = set()
+            for opp_root in self.endangered_groups[opponent]:
+                capture_moves.update(self.group_data[opp_root]['liberties'])
+            return list(capture_moves)
+        
+        if self.endangered_groups[self.next]:
+            actions = set()
+            for root in self.endangered_groups[self.next]:
+                actions.update(self.group_data[root]['liberties'])
+            return list(actions)
+        
+        moves = []
+        for m in self.possible_actions[self.next]:
+            if not self._is_suicide(m, self.next):
+                moves.append(m)
+        return moves
+    
+    def _is_suicide(self, point: tuple[int, int], color: int) -> bool:
+        dirs = ((0, 1), (0, -1), (1, 0), (-1, 0))
+        for dx, dy in dirs:
+            x, y = point[0] + dx, point[1] + dy
+            if( (1 <= x < BOARD_SIZE) and (1 <= y < BOARD_SIZE)):
+                if self.board[(x, y)] == self.EMPTY:
+                    return False
+
+                if self.board[(x, y)] == color:
+                    root = self.find_root((x, y))
+                    liberties = self.group_data[root]['liberties']
+
+                    if len(liberties) > 1 or (len(liberties) == 1 and point not in liberties):
+                        return False 
+        return True
+    
+    def _snapshot(self, action: tuple[int,int]):
+        self.undo_stack.append((
+            self.parent.copy(),
+            {k: {'stones': v['stones'], 'liberties': v['liberties'].copy()} for k,v in self.group_data.items()},
+            {k: v.copy() for k,v in self.endangered_groups.items()},
+            {k: v.copy() for k, v in self.possible_actions.items()},
+            action,
+            self.hash,
+            self.winner,
+            self.draw,
+            self.next
+        ))
+
+    def undo(self):
+        if not self.undo_stack:
+            raise RuntimeError("Nothing to undo")
+        (self.parent,
+         self.group_data,
+         self.endangered_groups,
+         self.possible_actions,
+         action,
+         self.hash, self.winner, self.draw, self.next) = self.undo_stack.pop()
+
+        self.board[action] = self.EMPTY
+
+    def perform_move(self, action):
+        self._snapshot(action)
+        self.put_stone(action, self.next)
+        self.next = self.get_opponent(self.next)
+        color_idx = 0 if self.next == -1 else 1
+        self.hash ^= self.zobrist[action[0]][action[1]][color_idx]
+
+class Agent1v3:
+    """A class to generate a random action for a Go board."""
+    def __init__(self, color, verbose = False):
+        self.color = -1 if color == 'WHITE' else 1
+        self.opponent_color = -self.color
+        self.MAX_DEPTH = 4
+
+        self.W_LIBERTIES = 10
+        self.W_ATARI = 40
+        self.W_WIN = 1e5
+        self.verbose = verbose
+
+        self.light_board = None
+        
+        self.transposition = {}   
+
+    def evaluate(self, board: LightweightBoardHandler) -> int:
+        if(board.draw): return 0
+        if(board.winner is not None):
+            if(board.winner == self.color): return self.W_WIN
+            else: return -self.W_WIN
+        score = 0
+        score += self.W_LIBERTIES * (len(board.possible_actions[self.opponent_color]) - len(board.possible_actions[self.color]))
+        return score
+
+    def minimax(self, board: LightweightBoardHandler, depth: int, maximizing_player: bool) -> int:  
+        # color_idx = 0 if board.next == 'BLACK' else 1
+        key = (board.hash, board.next)
+        
+        if(key in self.transposition):
+            return self.transposition[key]
+        
+        if(len(board.get_legal_actions()) == 0): 
+            return 0,1
+        
+        pos = 0   
+        if((depth == 0) or (board.winner is not None)):
+            score = self.evaluate(board)
+            self.transposition[key] = (score,1)
+            return score,1
+        if(maximizing_player):
+            max_score = -1e9
+            for action in board.get_legal_actions():
+                board.perform_move(action)
+                # print(board.parent)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, False)
+                score, new_pos = self.minimax(board, depth-1, False)
+                max_score = max(max_score, score)
+                pos += new_pos
+                board.undo()
+                # print("RESTORED: ")
+                # print(self.light_board.board)
+                
+            self.transposition[key] = (max_score, pos)
+            return max_score, pos
+        
+        else:
+            min_score = 1e9
+            for action in board.get_legal_actions():
+                board.perform_move(action)
+                # print(board.parent)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, True)
+                score, new_pos = self.minimax(board, depth-1, True)
+                min_score = min(min_score, score)
+                pos += new_pos
+                board.undo()
+                # print("RESTORED: ")
+                # print(self.light_board.board)
+            self.transposition[key] = (min_score, pos)
+            return min_score, pos
+
+    def get_best_action(self, board: Board, depth: int):
+        pos = 0
+        best_score = -1e9
+        best_action = None
+
+        self.transposition.clear()
+        # print(f"Legal Actions: {board.legal_actions}")
+        # self.print_point_dict(board.libertydict)
+        self.light_board = LightweightBoardHandler(board)
+
+        for action in self.light_board.get_legal_actions():            
+            # print("STORED_______________________")
+            # for key,val in snap.libertydict['BLACK'].items(): 
+            #     print(key , val)
+        
+            # for key,val in snap.libertydict['WHITE'].items(): 
+            #     print(key , val)
+            # print()
+
+            self.light_board.perform_move(action)
+            # print(self.light_board.parent)
+            # successor = board.copy()
+            # successor.put_stone(action, check_legal=False)
+            # score, new_pos = self.minimax(successor, depth, maximizing_player=False)
+            # self.print_point_dict(board.libertydict)
+            score, new_pos = self.minimax(self.light_board, depth, maximizing_player=False)
+            pos += new_pos
+            if(score > best_score):
+                best_score = score
+                best_action = action
+            
+            self.light_board.undo()
+            # print("RESTORED: ")
+            # print(self.light_board.board)
+
+        return best_action, pos
+
+    def print_point_dict(self, point_dict:PointDict):
+        for key,val in point_dict.d['BLACK'].items(): 
+            print(key , val)
+        
+        for key,val in point_dict.d['WHITE'].items(): 
+            print(key , val)
+        print()
+
+    def get_action(self, board: Board):
+        """
+        Returns a random legal action from the board.
+
+        :param board: The current Go board state.
+        :return: A random legal action (tuple) or None if no actions are available.
+        """
+        start_time = time.time()
+        actions = board.legal_actions
+        if actions:
+            best_action, pos = self.get_best_action(board, self.MAX_DEPTH)
+            # print("BEST ACTION: ", best_action, board.next)
+            if(self.verbose):
+                print(f"Possibilities considered: {pos}")
+                print(f"Decision Time: {time.time() - start_time}. ({pos/(time.time() - start_time)} possibilities/sec)")
+                print(self.light_board.board)
+                print(self.light_board.possible_actions)
+
+            if(time.time() - start_time > 10): 
+                print(f"Took too much time: {time.time() - start_time}")
+                print(f"Possibilities considered: {pos}")
+            return best_action
+        return None
+###########################################################################################################
 
 class GroupShadow:
     """Store only the mutable fields of a Group (cheap)."""
@@ -58,7 +366,6 @@ class GroupShadow:
         self.points = list(group.points)
         # liberties is a set in your Group; store a shallow copy
         self.liberties = set(group.liberties)
-
 
 class BoardSnapshot:
     """
