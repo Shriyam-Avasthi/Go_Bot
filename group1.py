@@ -59,6 +59,7 @@ class LightweightBoardHandler():
         self.winner = None
         self.draw = False
         self.next = self.BLACK if board.next == 'BLACK' else self.WHITE
+        self.stone_count = 0
 
         self.DIRS = ((0, 1), (0, -1), (1, 0), (-1, 0))
 
@@ -107,6 +108,7 @@ class LightweightBoardHandler():
     def put_stone(self, point: tuple[int,int], color: int):
         self.board[point] = color
         self.parent[point] = point
+        self.stone_count += 1
         self.group_data[point] = {'liberties' : set(), 'stones': 1}
         
         liberties = []
@@ -204,6 +206,7 @@ class LightweightBoardHandler():
          self.hash, self.winner, self.draw, self.next) = self.undo_stack.pop()
 
         self.board[action] = self.EMPTY
+        self.stone_count -= 1
 
     def perform_move(self, action):
         self._snapshot(action)
@@ -221,7 +224,8 @@ class Agent1v4:
         self.MAX_DEPTH = 5 if not max_depth else max_depth
 
         self.W_LIBERTIES = 10
-        self.W_ATARI = 40
+        self.W_MOBILITY = 20
+        self.W_ATARI = 50
         self.W_WIN = 1e5
         self.verbose = verbose
 
@@ -229,13 +233,29 @@ class Agent1v4:
         
         self.transposition = {}   
 
-    def evaluate(self, board: LightweightBoardHandler) -> int:
-        if(board.draw): return 0
+    def evaluate(self, board: LightweightBoardHandler, legal_action_count: int) -> int:
+        if(board.draw): 
+            return 0
         if(board.winner is not None):
             if(board.winner == self.color): return self.W_WIN
             else: return -self.W_WIN
-        score = 0
-        score += self.W_LIBERTIES * (len(board.possible_actions[self.opponent_color]) - len(board.possible_actions[self.color]))
+        
+        if(legal_action_count == 0): return 0
+        
+        own_atari = len(board.endangered_groups[self.color])
+        opp_atari = len(board.endangered_groups[self.opponent_color])
+
+        if((board.next == self.color) and (opp_atari > 0)):
+            return self.W_WIN
+        if((board.next == self.opponent_color) and (own_atari > 0)):
+            return -self.W_WIN
+
+        score = self.W_ATARI * (opp_atari - own_atari)
+        score += self.W_MOBILITY * legal_action_count
+        own_libs = len(board.possible_actions[self.color]) 
+        opp_libs  = len(board.possible_actions[self.opponent_color])
+        score += self.W_LIBERTIES * ((own_libs - opp_libs) / max(1, board.stone_count))  
+
         return score
 
     def minimax(self, board: LightweightBoardHandler, depth: int, alpha: int, beta: int, maximizing_player: bool) -> int:  
@@ -246,14 +266,12 @@ class Agent1v4:
             return self.transposition[key]
         
         legal_actions = board.get_legal_actions()
-        if(len(legal_actions) == 0): 
-            return 0,1
-        
-        pos = 0   
         if((depth == 0) or (board.winner is not None)):
-            score = self.evaluate(board)
+            score = self.evaluate(board, len(legal_actions))
             self.transposition[key] = (score,1)
             return score,1
+        
+        pos = 0   
         if(maximizing_player):
             max_score = -1e9
             for action in legal_actions:
@@ -323,15 +341,17 @@ class Agent1v4:
             # score, new_pos = self.minimax(successor, depth, maximizing_player=False)
             # self.print_point_dict(board.libertydict)
             score, new_pos = self.minimax(self.light_board, depth, alpha=-1e9, beta=1e9, maximizing_player=False)
-            # if(self.verbose):
+            if(self.verbose):
                 # self.light_board.perform_move(self.light_board.get_legal_actions()[0])
-                # print(self.light_board.possible_actions, score)         
+                print(action, score)         
                 # self.light_board.undo()
             pos += new_pos
             if(score > best_score):
                 best_score = score
                 best_action = action
             
+            if(score == self.W_WIN):
+                break
             self.light_board.undo()
             # print("RESTORED: ")
             # print(self.light_board.board)
@@ -365,7 +385,7 @@ class Agent1v4:
                 # print(self.light_board.get_legal_actions())
 
             if(time.time() - start_time > 10): 
-                print(f"Took too much time: {time.time() - start_time}")
+                print(f"!!! Took too much time: {time.time() - start_time}. ({pos/(time.time() - start_time)} possibilities/sec)")
                 print(f"Possibilities considered: {pos}")
             return best_action
         return None
