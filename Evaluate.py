@@ -67,7 +67,7 @@ class Match:
 
             # Apply action
             prev_legal_actions = self.board.legal_actions.copy()
-            self.board.put_stone(point, check_legal=False)
+            self.board.put_stone(point, check_legal=True)
             # Remove previous legal actions on board
             for action in prev_legal_actions:
                 self.ui.remove(action)
@@ -105,8 +105,7 @@ class Match:
                 point = self.perform_one_move(self.agent_white)
 
             # Apply action
-            self.board.put_stone(point, check_legal=False)  # Assuming agent always gives legal actions
-
+            self.board.put_stone(point, check_legal=True)
 
         if self.board.end_by_no_legal_actions:
             print('Game ends early (no legal action is available for %s)' % self.board.next)
@@ -148,8 +147,8 @@ def main():
     white_wins = 0
     draws = 0
     for i in tqdm(range(SAMPLE_SIZE), desc="Progress: ", unit="matches"):
-        agent_white = Agent1v2('WHITE')
-        agent_black = Agent1v4('BLACK', verbose=True)
+        agent_white = Agent1v4('WHITE', max_depth=5)
+        agent_black = Agent1v4('BLACK', max_depth=7, verbose=True)
 
         match = Match(agent_black=agent_black, agent_white=agent_white, gui=True, dir_save=None)
 

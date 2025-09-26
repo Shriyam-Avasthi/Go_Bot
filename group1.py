@@ -176,7 +176,7 @@ class LightweightBoardHandler():
                     root = self.find_root((x, y))
                     liberties = self.group_data[root]['liberties']
 
-                    if len(liberties) > 1 or (len(liberties) == 1 and point not in liberties):
+                    if len(liberties) > 1 :
                         return False 
         return True
     
@@ -215,10 +215,10 @@ class LightweightBoardHandler():
 
 class Agent1v4:
     """A class to generate a random action for a Go board."""
-    def __init__(self, color, verbose = False):
+    def __init__(self, color, max_depth = None, verbose = False):
         self.color = -1 if color == 'WHITE' else 1
         self.opponent_color = -self.color
-        self.MAX_DEPTH = 4
+        self.MAX_DEPTH = 5 if not max_depth else max_depth
 
         self.W_LIBERTIES = 10
         self.W_ATARI = 40
@@ -265,10 +265,10 @@ class Agent1v4:
                 score, new_pos = self.minimax(board, depth-1, alpha, beta, False)
                 max_score = max(max_score, score)
                 alpha = max(alpha, score)
+                pos += new_pos
                 if(beta <= alpha): 
                     board.undo()
                     break
-                pos += new_pos
                 board.undo()
                 # print("RESTORED: ")
                 # print(self.light_board.board)
@@ -287,10 +287,10 @@ class Agent1v4:
                 score, new_pos = self.minimax(board, depth-1, alpha, beta, True)
                 min_score = min(min_score, score)
                 beta = min(beta, score)
+                pos += new_pos
                 if(beta <= alpha): 
                     board.undo()
                     break
-                pos += new_pos
                 board.undo()
                 # print("RESTORED: ")
                 # print(self.light_board.board)
@@ -307,7 +307,7 @@ class Agent1v4:
         # self.print_point_dict(board.libertydict)
         self.light_board = LightweightBoardHandler(board)
         legal_actions = self.light_board.get_legal_actions()
-        for action in legal_actions:            
+        for action in legal_actions:   
             # print("STORED_______________________")
             # for key,val in snap.libertydict['BLACK'].items(): 
             #     print(key , val)
@@ -323,6 +323,10 @@ class Agent1v4:
             # score, new_pos = self.minimax(successor, depth, maximizing_player=False)
             # self.print_point_dict(board.libertydict)
             score, new_pos = self.minimax(self.light_board, depth, alpha=-1e9, beta=1e9, maximizing_player=False)
+            # if(self.verbose):
+                # self.light_board.perform_move(self.light_board.get_legal_actions()[0])
+                # print(self.light_board.possible_actions, score)         
+                # self.light_board.undo()
             pos += new_pos
             if(score > best_score):
                 best_score = score
@@ -331,7 +335,7 @@ class Agent1v4:
             self.light_board.undo()
             # print("RESTORED: ")
             # print(self.light_board.board)
-
+        # print("---------------------------------------------------------------------------")
         return best_action, pos
 
     def print_point_dict(self, point_dict:PointDict):
@@ -358,14 +362,14 @@ class Agent1v4:
                 print(f"Possibilities considered: {pos}")
                 print(f"Decision Time: {time.time() - start_time}. ({pos/(time.time() - start_time)} possibilities/sec)")
                 # print(self.light_board.board)
-                # print(self.light_board.possible_actions)
+                # print(self.light_board.get_legal_actions())
 
             if(time.time() - start_time > 10): 
                 print(f"Took too much time: {time.time() - start_time}")
                 print(f"Possibilities considered: {pos}")
             return best_action
         return None
-
+    
 class Agent1v3:
     """A class to generate a random action for a Go board."""
     def __init__(self, color, verbose = False):
