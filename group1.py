@@ -541,6 +541,20 @@ class Agent1v6:
         self.LOWERBOUND_FLAG = 1
         self.UPPERBOUND_FLAG = 2  
 
+        self.TIME_CHECK_NODES = 128
+        self.start_time = 0
+        self.node_count = 0
+
+        self.time_is_up = False  
+
+    def time_exceeded(self):
+        self.node_count += 1
+        if self.node_count % self.TIME_CHECK_NODES == 0:
+            self.node_count = 0
+            self.elapsed = time.time() - self.start_time
+            self.time_is_up = (self.elapsed >= self.MAX_TIME)
+        return self.time_is_up
+
     def _get_move_scores(self, board: LightweightBoardHandler):
         move_scores = {}
         opponent = board.get_opponent(board.next)
@@ -659,6 +673,9 @@ class Agent1v6:
         return score
     
     def quiescence_search(self, board: LightweightBoardHandler, depth: int, alpha: int, beta: int, maximizing_player: bool):
+        if self.time_exceeded():
+            return self.evaluate_v2(board), 0
+        
         key = (board.hash, board.next)
         q_depth_offset = 1000
 
@@ -687,7 +704,8 @@ class Agent1v6:
             return initial_eval, 1
             
         violent_moves = [action for action in self._order_moves(board, board.get_legal_actions(), 0) 
-                        if self._get_move_scores(board).get(action, 0) > 0]
+                        if self._get_move_scores(board).get(action, 0) > 0][:5]
+        
         if not violent_moves:
             return initial_eval, 1
         
@@ -702,6 +720,9 @@ class Agent1v6:
                 board.perform_move(action)
                 score, new_pos = self.quiescence_search(board, depth - 1, alpha, beta, False)
                 board.undo()
+
+                if self.time_is_up:
+                    return max_score, 0
                 
                 pos += new_pos
                 if score > max_score:
@@ -727,7 +748,10 @@ class Agent1v6:
                 board.perform_move(action)
                 score, new_pos = self.quiescence_search(board, depth - 1, alpha, beta, True)
                 board.undo()
-
+                
+                if self.time_is_up:
+                    return min_score, 0
+                
                 pos += new_pos
                 if score < min_score:
                     min_score = score
@@ -768,8 +792,16 @@ class Agent1v6:
         if board.winner is not None or board.draw:
             return self.evaluate_v2(board), 1
         
-        if depth == 0:
-            return self.quiescence_search(board, 3, alpha, beta, maximizing_player)
+        if self.time_exceeded():
+            return self.evaluate_v2(board), 0
+        
+        if (depth == 0):
+            time_remaining = self.MAX_TIME - self.elapsed
+            if time_remaining < 0.5:
+                return self.evaluate_v2(board), 1
+            q_depth = min(3, int(time_remaining * 2))
+            return self.quiescence_search(board, q_depth, alpha, beta, maximizing_player)
+        
 
         pos = 0
         
@@ -786,6 +818,9 @@ class Agent1v6:
                 board.perform_move(action)
                 score, new_pos = self.minimax(board, depth - 1, alpha, beta, False)
                 board.undo()
+
+                if self.time_is_up:
+                    return max_score, 0
                 
                 pos += new_pos
                 if score > max_score:
@@ -812,6 +847,9 @@ class Agent1v6:
                 score, new_pos = self.minimax(board, depth - 1, alpha, beta, True)
                 board.undo()
 
+                if self.time_is_up:
+                    return min_score, 0
+                
                 pos += new_pos
                 if score < min_score:
                     min_score = score
@@ -836,6 +874,8 @@ class Agent1v6:
         total_pos = 0
         current_depth = 1
         self.start_time = time.time()
+        self.time_is_up = 0
+        self.node_count = 0
         self.elapsed = 0
         
         self.transposition.clear()
@@ -861,7 +901,14 @@ class Agent1v6:
                 move_scores = self._get_move_scores(board)
                 legal_actions.sort(key=lambda m: move_scores.get(m, 0), reverse=True)
             
+            search_complete = True
             for action in legal_actions:
+                self.elapsed = time.time() - self.start_time
+                if self.elapsed >= max_time:
+                    if self.verbose:
+                        print("Time nearly up before trying action, breaking out")
+                    search_complete = False
+                    break
                 board.perform_move(action)
                 score, new_pos = self.minimax(board, current_depth - 1, -1e9, 1e9, False)
                 board.undo()
@@ -874,27 +921,28 @@ class Agent1v6:
                 if score == self.W_WIN:
                     break
             
-            total_pos += pos
-            best_action = depth_best_action
-            best_score = depth_best_score
-            
-            self.best_moves_history[board.hash] = best_action
-            
-            if self.verbose:
-                print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Depth {current_depth}: Best move {best_action} with score {best_score} ({pos} positions)")
-            
-            if best_score >= self.W_WIN * 0.9:
+            if (search_complete) or (best_action is None):
+                total_pos += pos
+                best_action = depth_best_action
+                best_score = depth_best_score
+                
+                self.best_moves_history[board.hash] = best_action
+                
                 if self.verbose:
-                    print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Winning move found!")
-                break
+                    print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Depth {current_depth}: Best move {best_action} with score {best_score} ({pos} positions)")
+                
+                if best_score >= self.W_WIN * 0.9:
+                    if self.verbose:
+                        print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Winning move found!")
+                    break
 
-            if best_score <= -self.W_WIN * 0.9:
-                if self.verbose:
-                    print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Winning not possible :(")
-                break
+                if best_score <= -self.W_WIN * 0.9:
+                    if self.verbose:
+                        print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Winning not possible :(")
+                    break
 
-            current_depth += 1
-            self.elapsed = time.time() - self.start_time
+                current_depth += 1
+                self.elapsed = time.time() - self.start_time
         
         return best_action, total_pos
 
@@ -970,7 +1018,7 @@ class Agent1v6:
             print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Best Move: {best_action}")
             print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Decision Time: {elapsed:.2f}s ({pos/elapsed:.0f} pos/sec)")
         
-        if elapsed > 18:
+        if elapsed > 0.8 * self.MAX_TIME:
             print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] !!! Took too much time: {elapsed:.2f}s ({pos/elapsed:.0f} pos/sec)")
             print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Possibilities considered: {pos}")
         

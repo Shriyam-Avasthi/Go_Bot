@@ -143,19 +143,19 @@ class Match:
 
 def main():
 
-    SAMPLE_SIZE = 10
+    SAMPLE_SIZE = 1
     black_wins = 0
     white_wins = 0
     draws = 0
     for i in tqdm(range(SAMPLE_SIZE), desc="Progress: ", unit="matches"):
         #agent_white = Agent1v5(color="WHITE", time_limit=10.0, verbose=True) #Agent1v4('WHITE', max_depth=5, verbose=True)
         #agent_white = Agent1v4('WHITE', max_depth=7, verbose=True)
-        #agent_white = Agent1v6('WHITE', max_time=2, verbose=True)
-        agent_white = Agent2('WHITE')
+        agent_white = Agent1v6('WHITE', max_time=15, verbose=False)
+        #agent_white = Agent2('WHITE')
         #agent_black = Agent1v5(color="BLACK", time_limit=10.0, verbose=False) #Agent1v4('BLACK', max_depth=5)
         #agent_black = Agent1v4('BLACK', max_depth=7, verbose=True)
-        agent_black = Agent1v6('BLACK', max_time=15, verbose=False)
-        #agent_black = Agent2('BLACK')
+        #agent_black = Agent1v6('BLACK', max_time=15, verbose=False)
+        agent_black = None #Agent2('BLACK')
         
         dir_save = 'game/images'
         match = Match(agent_black=agent_black, agent_white=agent_white, gui=True, dir_save=dir_save)
