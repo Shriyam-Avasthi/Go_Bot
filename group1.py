@@ -7,6 +7,7 @@ from game.util import PointDict
 from copy import deepcopy
 import time
 import numpy as np
+import math
 
 import random
 
@@ -50,7 +51,7 @@ def board_hash(board, zobrist) -> int:
     return h
 
 class LightweightBoardHandler():
-    def __init__(self, board: Board):
+    def __init__(self, board: Board, save_states = True):
         self.EMPTY = 0
         self.BLACK = 1
         self.WHITE = -1
@@ -60,7 +61,7 @@ class LightweightBoardHandler():
         self.draw = False
         self.next = self.BLACK if board.next == 'BLACK' else self.WHITE
         self.stone_count = 0
-
+        self.save_states = save_states
         self.DIRS = ((0, 1), (0, -1), (1, 0), (-1, 0))
 
         self.possible_actions = {self.BLACK: set() ,self.WHITE: set()}
@@ -74,11 +75,11 @@ class LightweightBoardHandler():
         for point, groups in board.stonedict.d["BLACK"].items():
             if groups: 
                 self.put_stone(point, self.BLACK)
-                self.hash ^= self.zobrist[point[0]][point[1]][1]
+                self.hash ^= self.zobrist[point[0]][point[1]][0]
         for point,groups in board.stonedict.d["WHITE"].items():
             if groups: 
                 self.put_stone(point, self.WHITE)
-                self.hash ^= self.zobrist[point[0]][point[1]][0]
+                self.hash ^= self.zobrist[point[0]][point[1]][1]
 
     def find_root(self, point: tuple[int,int]):
         if(self.parent[point] == point): return point
@@ -103,7 +104,7 @@ class LightweightBoardHandler():
             del self.group_data[root2]
     
     def get_opponent(self, color: int):
-        return 1 if color==-1 else -1
+        return -color
 
     def put_stone(self, point: tuple[int,int], color: int):
         self.board[point] = color
@@ -158,7 +159,9 @@ class LightweightBoardHandler():
         if self.endangered_groups[self.next]:
             actions = set()
             for root in self.endangered_groups[self.next]:
-                actions.update(self.group_data[root]['liberties'])
+                for liberty in self.group_data[root]['liberties']:
+                    if not self._is_suicide(liberty, self.next):
+                        actions.add(liberty)
             return list(actions)
         
         moves = []
@@ -209,12 +212,769 @@ class LightweightBoardHandler():
         self.stone_count -= 1
 
     def perform_move(self, action):
-        self._snapshot(action)
+        current_player = self.next
+        if(self.save_states):
+            self._snapshot(action)
         self.put_stone(action, self.next)
         self.next = self.get_opponent(self.next)
-        color_idx = 0 if self.next == -1 else 1
+        
+        color_idx = 0 if current_player == self.BLACK else 1
         self.hash ^= self.zobrist[action[0]][action[1]][color_idx]
 
+
+class MCTSNode:
+    def __init__(self, move=None, parent=None, to_play=None):
+        self.move = move     
+        self.parent = parent
+        self.children = {}     
+        self.visits = 0
+        self.wins = 0.0            
+        self.untried_moves = None   
+        self.to_play = to_play    
+
+    def q(self):
+        return self.wins
+
+    def n(self):
+        return self.visits
+    
+class MCTS:
+    def __init__(self, color: int, time_limit: float = None, iterations: int = 1000, c_puct: float = 1.4):
+        self.color = color
+        self.opponent_color = -color
+        self.iterations = iterations
+        self.time_limit = time_limit
+        self.c = c_puct
+        self.rng = random.Random()
+
+        # Reduced weights for more conservative evaluation
+        self.W_LIBERTIES = 5
+        self.W_MOBILITY = 10
+        self.W_ATARI = 100
+        self.W_WIN = 1e5
+
+    def evaluate_v2(self, board: LightweightBoardHandler) -> int:
+        if board.draw:
+            return 0
+        if board.winner is not None:
+            return self.W_WIN if board.winner == self.color else -self.W_WIN
+
+        legal_actions = board.get_legal_actions()
+        if not legal_actions:
+            return self.W_WIN if board.next == self.opponent_color else -self.W_WIN
+
+        own_atari = len(board.endangered_groups[self.color])
+        opp_atari = len(board.endangered_groups[self.opponent_color])
+
+        score = self.W_ATARI * (opp_atari - own_atari)
+
+        if (board.next == self.color) and (opp_atari > 0):
+            return self.W_WIN * 0.95
+        if (board.next == self.opponent_color) and (own_atari > 0):
+            return -self.W_WIN * 0.95
+        
+        own_libs = len(board.possible_actions[self.color]) 
+        opp_libs = len(board.possible_actions[self.opponent_color])
+                
+        score += self.W_LIBERTIES * (own_libs - opp_libs)
+
+        if board.next == self.color:
+            score += self.W_MOBILITY * len(legal_actions)
+        else:
+            score -= self.W_MOBILITY * len(legal_actions)
+
+        return score
+    
+    def eval_to_reward(self, eval_score: float) -> float:
+        if eval_score >= 1e4:
+            return 1.0
+        if eval_score <= -1e4:
+            return 0
+        
+        scale = 500.0  # Controls steepness
+        normalized = math.tanh(eval_score / scale)
+        return 0.5 * (normalized + 1.0)
+
+    def _get_move_scores(self, board: LightweightBoardHandler):
+        move_scores = {}
+        opponent = board.get_opponent(board.next)
+
+        # Priority 1: Capture moves
+        if board.endangered_groups[opponent]:
+            for opp_root in board.endangered_groups[opponent]:
+                for liberty in board.group_data[opp_root]['liberties']:
+                    move_scores[liberty] = 1000
+
+        # Priority 2: Saving moves
+        if board.endangered_groups[board.next]:
+            for root in board.endangered_groups[board.next]:
+                for liberty in board.group_data[root]['liberties']:
+                    if not board._is_suicide(liberty, board.next):
+                        if liberty not in move_scores:
+                            move_scores[liberty] = 900
+
+        # Priority 3: Threatening moves (reduce opponent to 2 liberties)
+        for root, data in board.group_data.items():
+            if board.board[root] == opponent and len(data['liberties']) == 2:
+                for liberty in data['liberties']:
+                    if not board._is_suicide(liberty, board.next):
+                        if liberty not in move_scores:
+                            move_scores[liberty] = 500
+        
+        return move_scores
+
+    def _uct_select(self, node: MCTSNode):
+        best_move, best_child, best_val = None, None, -1e9
+        
+        for move, child in node.children.items():
+            if child.n() == 0:
+                u = float('inf')
+            else:
+                child_winrate = child.q() / child.n()
+                exploit = 1.0 - child_winrate
+                explore = self.c * math.sqrt(math.log(node.n() + 1) / child.n())
+                u = exploit + explore
+            
+            if u > best_val:
+                best_val = u
+                best_child = child
+                best_move = move
+        
+        return best_move, best_child
+
+    def _rollout_policy(self, board: 'LightweightBoardHandler'):
+        """
+        Improved rollout policy: prioritize capture/save moves, 
+        then sample randomly with weighted probabilities.
+        """
+        moves = board.get_legal_actions()
+        if not moves:
+            return None
+            
+        move_scores = self._get_move_scores(board)
+        
+        # First check for high-priority moves
+        for move in moves:
+            if move_scores.get(move, 0) >= 900:  # Capture or save
+                return move
+        
+        # Otherwise, use weighted random selection
+        weights = [move_scores.get(m, 1) for m in moves]
+        total = sum(weights)
+        if total == 0:
+            return self.rng.choice(moves)
+        
+        # Weighted random choice
+        r = self.rng.random() * total
+        cumsum = 0
+        for move, weight in zip(moves, weights):
+            cumsum += weight
+            if r <= cumsum:
+                return move
+        
+        return moves[-1]  # Fallback
+
+    def _simulate(self, board: LightweightBoardHandler, rollout_limit: int = 50):
+
+        initial_player = board.next
+        steps = 0
+        
+        while (board.winner is None) and (not board.draw) and (steps < rollout_limit):
+            moves = board.get_legal_actions()
+            if not moves:
+                break
+            
+            move = self._rollout_policy(board)
+            if move is None:
+                break
+                
+            board.perform_move(move)
+            steps += 1
+
+        if board.draw:
+            reward = 0.5
+        elif board.winner is not None:
+            reward = 1.0 if board.winner == initial_player else 0.0
+        else:
+            eval_score = self.evaluate_v2(board)
+            if initial_player == self.color:
+                reward = self.eval_to_reward(eval_score)
+            else:
+                reward = 1.0 - self.eval_to_reward(eval_score)
+        
+        return reward, steps
+
+    def _expand(self, node: MCTSNode, board: LightweightBoardHandler):
+
+        if node.untried_moves is None:
+            moves = board.get_legal_actions()
+            move_scores = self._get_move_scores(board)
+            moves.sort(key=lambda m: move_scores.get(m, 0), reverse=True)
+            node.untried_moves = moves
+        
+        if not node.untried_moves:
+            return None
+        
+        move = node.untried_moves.pop(0)
+        board.perform_move(move)
+        
+        child = MCTSNode(move=move, parent=node, to_play=board.next)
+        node.children[move] = child
+        return child
+
+    def _backpropagate(self, node: MCTSNode, reward: float):
+        current_reward = reward
+        
+        while node is not None:
+            node.visits += 1
+            node.wins += current_reward
+            
+            current_reward = 1.0 - current_reward
+            node = node.parent
+
+    def choose(self, board: 'Board'):
+        
+        light = LightweightBoardHandler(board, save_states=True)
+        root = MCTSNode(move=None, parent=None, to_play=light.next)
+        root.untried_moves = None
+        root.visits = 1
+        root.wins = 0.5
+
+        start_time = time.time()
+        iterations = 0
+        initial_stack_size = len(light.undo_stack)
+        
+        while True:
+            if (self.time_limit is not None) and ((time.time() - start_time) >= self.time_limit):
+                break
+            if (self.time_limit is None) and (iterations >= self.iterations):
+                break
+            iterations += 1
+
+            node = root
+
+            # Selection
+            while (node.untried_moves is not None and len(node.untried_moves) == 0) and node.children:
+                move, child = self._uct_select(node)
+                if child is None:
+                    break
+                light.perform_move(move)
+                node = child
+
+            # Expansion
+            if light.winner is None and not light.draw:
+                child = self._expand(node, light)
+                if child is not None:
+                    node = child
+
+            # Simulation
+            reward, steps = self._simulate(light)
+
+            # Backprop
+            self._backpropagate(node, reward)
+
+            while len(light.undo_stack) > initial_stack_size:
+                light.undo()
+
+        print(f"MCTS Iterations: {iterations}")
+        if root.children:
+            sorted_children = sorted(root.children.items(), 
+                                   key=lambda x: x[1].visits, 
+                                   reverse=True)
+            print("Top moves:")
+            for mv, ch in sorted_children[:5]:
+                winrate = ch.wins / max(1, ch.visits)
+                print(f"  {mv}: visits={ch.visits}, winrate={winrate:.3f}")
+
+        if not root.children:
+            return None
+        
+        best = max(root.children.values(), key=lambda n: n.visits)
+        return best.move
+    
+
+class Agent1v5:
+
+    def __init__(self, color, time_limit: float = 1.0, iterations: int = None, verbose: bool = False):
+
+        self.color = -1 if color == 'WHITE' else 1
+        self.opponent_color = -self.color
+        self.verbose = verbose
+
+        if iterations is not None:
+            self.mcts = MCTS(color=self.color, iterations=iterations, time_limit=None)
+        else:
+            self.mcts = MCTS(color=self.color, time_limit=time_limit)
+
+    def get_action(self, board: Board):
+        
+        start_time = time.time()
+        move = self.mcts.choose(board)
+        if self.verbose:
+            # if move:
+            #     print(f"[Agent1v5] Selected move {move} for {('BLACK' if self.color==1 else 'WHITE')}")
+            # else:
+            #     print(f"[Agent1v5] No legal moves for {('BLACK' if self.color==1 else 'WHITE')}")
+            print(f"[Agent1v5] Decision time: {time.time() - start_time:.3f}s")
+        return move
+
+#################################################################################################################################
+
+class Agent1v6:
+    def __init__(self, color, max_time = None, verbose = False):
+        self.color = -1 if color == 'WHITE' else 1
+        self.opponent_color = -self.color
+        self.MAX_TIME = 2 if not max_time else max_time
+
+        self.W_LIBERTIES = 10
+        self.W_MOBILITY = 30
+        self.W_ATARI = 80
+        self.W_WIN = 1e5
+        self.verbose = verbose
+
+        self.light_board = None
+        
+        self.transposition = {}   
+        self.best_moves_history = {}
+
+        self.EXACT_FLAG = 0
+        self.LOWERBOUND_FLAG = 1
+        self.UPPERBOUND_FLAG = 2  
+
+    def _get_move_scores(self, board: LightweightBoardHandler):
+        move_scores = {}
+        opponent = board.get_opponent(board.next)
+
+        # Priority 1: Capture moves are the best
+        if board.endangered_groups[opponent]:
+            for opp_root in board.endangered_groups[opponent]:
+                for liberty in board.group_data[opp_root]['liberties']:
+                    move_scores[liberty] = 100
+
+        # Priority 2: Saving moves are the next best
+        if board.endangered_groups[board.next]:
+            for root in board.endangered_groups[board.next]:
+                for liberty in board.group_data[root]['liberties']:
+                    if not board._is_suicide(liberty, board.next):
+                        if liberty not in move_scores:
+                            move_scores[liberty] = 90
+
+        # Priority 3: Threatening moves
+        for root, data in board.group_data.items():
+            if board.board[root] == opponent and len(data['liberties']) == 2:
+                for liberty in data['liberties']:
+                    if not board._is_suicide(liberty, board.next):
+                        if liberty not in move_scores:
+                            move_scores[liberty] = 50
+        
+        return move_scores
+    
+    def _count_potential_eyes_numpy(self, board: LightweightBoardHandler):
+        padded_board = np.full((BOARD_SIZE + 2, BOARD_SIZE + 2), 99)
+        padded_board[1:-1, 1:-1] = board.board
+
+        center      = padded_board[1:-1, 1:-1]
+        north      = padded_board[0:-2, 1:-1]
+        south       = padded_board[2:  , 1:-1]
+        west        = padded_board[1:-1, 0:-2]
+        east        = padded_board[1:-1, 2:  ]
+
+        is_empty          = (center == board.EMPTY)
+        north_is_own      = (north == self.color)
+        south_is_own      = (south == self.color)
+        west_is_own       = (west  == self.color)
+        east_is_own       = (east  == self.color)
+        
+        own_eyes_mask = is_empty & north_is_own & south_is_own & west_is_own & east_is_own
+        own_eyes_count = np.sum(own_eyes_mask)
+
+        north_is_opp      = (north == self.opponent_color)
+        south_is_opp      = (south == self.opponent_color)
+        west_is_opp       = (west  == self.opponent_color)
+        east_is_opp       = (east  == self.opponent_color)
+
+        opp_eyes_mask = is_empty & north_is_opp & south_is_opp & west_is_opp & east_is_opp
+        opp_eyes_count = np.sum(opp_eyes_mask)
+        
+        return own_eyes_count, opp_eyes_count
+    
+    def _order_moves(self, board: LightweightBoardHandler, legal_actions: list, depth: int):
+        move_scores = self._get_move_scores(board)
+        
+        tt_move = None
+        key = (board.hash, board.next) 
+        if key in self.transposition:
+            entry = self.transposition[key]
+            tt_move = entry[4]
+
+        for action in legal_actions:
+            score = move_scores.get(action, 0)
+            
+            if action == tt_move:
+                score += 2000
+
+            if board.hash in self.best_moves_history and self.best_moves_history[board.hash] == action:
+                score += 1000 
+            
+            move_scores[action] = score
+        
+        legal_actions.sort(key=lambda m: move_scores.get(m, 0), reverse=True)
+        return legal_actions
+
+    def evaluate_v2(self, board: LightweightBoardHandler) -> int:
+        if board.draw:
+            return 0
+        if board.winner is not None:
+            return self.W_WIN if board.winner == self.color else -self.W_WIN
+
+        legal_actions = board.get_legal_actions()
+        if not legal_actions:
+            return self.W_WIN if board.next == self.opponent_color else -self.W_WIN
+
+        own_atari = len(board.endangered_groups[self.color])
+        opp_atari = len(board.endangered_groups[self.opponent_color])
+
+        score = self.W_ATARI * (opp_atari - own_atari)
+
+
+        if (board.next == self.color) and (opp_atari > 0):
+            return self.W_WIN * 0.9
+        if (board.next == self.opponent_color) and (own_atari > 0):
+            return -self.W_WIN * 0.9
+        
+        own_libs = len(board.possible_actions[self.color]) 
+        opp_libs = len(board.possible_actions[self.opponent_color])
+
+        # own_eyes, opp_eyes = self._count_potential_eyes_numpy(board)
+                
+        # W_EYE = 200
+        # score += W_EYE * (own_eyes - opp_eyes)
+        score += self.W_LIBERTIES * (own_libs - opp_libs)
+
+        if board.next == self.color:
+            score += self.W_MOBILITY * len(legal_actions)
+        else:
+            score -= self.W_MOBILITY * len(legal_actions)
+
+        return score
+    
+    def quiescence_search(self, board: LightweightBoardHandler, depth: int, alpha: int, beta: int, maximizing_player: bool):
+        key = (board.hash, board.next)
+        q_depth_offset = 1000
+
+        if key in self.transposition:
+            score, stored_depth, flag, _, best_move = self.transposition[key]
+            if stored_depth >= (q_depth_offset + depth):
+                if flag == self.EXACT_FLAG:
+                    return score, 0
+                elif flag == self.LOWERBOUND_FLAG:
+                    alpha = max(alpha, score)
+                elif flag == self.UPPERBOUND_FLAG:
+                    beta = min(beta, score)
+                
+                if alpha >= beta:
+                    return score, 0
+
+        initial_eval = self.evaluate_v2(board)
+        if depth == 0:
+            return initial_eval, 1
+
+        if maximizing_player:
+            alpha = max(alpha, initial_eval)
+        else:
+            beta = min(beta, initial_eval)
+        if alpha >= beta:
+            return initial_eval, 1
+            
+        violent_moves = [action for action in self._order_moves(board, board.get_legal_actions(), 0) 
+                        if self._get_move_scores(board).get(action, 0) > 0]
+        if not violent_moves:
+            return initial_eval, 1
+        
+        pos = 0
+        original_alpha = alpha
+        original_beta = beta
+        best_action_for_node = violent_moves[0]
+
+        if maximizing_player:
+            max_score = initial_eval
+            for action in violent_moves:
+                board.perform_move(action)
+                score, new_pos = self.quiescence_search(board, depth - 1, alpha, beta, False)
+                board.undo()
+                
+                pos += new_pos
+                if score > max_score:
+                    max_score = score
+                    best_action_for_node = action
+                
+                alpha = max(alpha, score)
+                if alpha >= beta:
+                    break
+            
+            flag = self.EXACT_FLAG
+            if max_score <= original_alpha:
+                flag = self.UPPERBOUND_FLAG
+            elif max_score >= beta:
+                flag = self.LOWERBOUND_FLAG
+            
+            self.transposition[key] = (max_score, q_depth_offset + depth, flag, 0, best_action_for_node)
+            return max_score, pos
+        
+        else:
+            min_score = initial_eval
+            for action in violent_moves:
+                board.perform_move(action)
+                score, new_pos = self.quiescence_search(board, depth - 1, alpha, beta, True)
+                board.undo()
+
+                pos += new_pos
+                if score < min_score:
+                    min_score = score
+                    best_action_for_node = action
+                
+                beta = min(beta, score)
+                if alpha >= beta:
+                    break
+            
+            flag = self.EXACT_FLAG
+            if min_score >= original_beta:
+                flag = self.LOWERBOUND_FLAG
+            elif min_score <= alpha:
+                flag = self.UPPERBOUND_FLAG
+            
+            self.transposition[key] = (min_score, q_depth_offset + depth, flag, 0, best_action_for_node)
+            return min_score, pos
+
+    def minimax(self, board: LightweightBoardHandler, depth: int, alpha: int, beta: int, maximizing_player: bool) -> tuple:
+        original_alpha = alpha
+        original_beta = beta
+        key = (board.hash, board.next)
+
+        if key in self.transposition:
+            score, stored_depth, flag, _, best_move = self.transposition[key]
+
+            if stored_depth >= depth and stored_depth < 1000:  # Not from quiescence
+                if flag == self.EXACT_FLAG:
+                    return score, 0
+                elif flag == self.LOWERBOUND_FLAG:
+                    alpha = max(alpha, score)
+                elif flag == self.UPPERBOUND_FLAG:
+                    beta = min(beta, score)
+                
+                if alpha >= beta:
+                    return score, 0
+        
+        if board.winner is not None or board.draw:
+            return self.evaluate_v2(board), 1
+        
+        if depth == 0:
+            return self.quiescence_search(board, 3, alpha, beta, maximizing_player)
+
+        pos = 0
+        
+        legal_actions = self._order_moves(board, board.get_legal_actions(), depth)
+        
+        if not legal_actions:
+            return self.evaluate_v2(board), 1
+
+        best_action_for_node = legal_actions[0]
+
+        if maximizing_player:
+            max_score = -1e9
+            for action in legal_actions:
+                board.perform_move(action)
+                score, new_pos = self.minimax(board, depth - 1, alpha, beta, False)
+                board.undo()
+                
+                pos += new_pos
+                if score > max_score:
+                    max_score = score
+                    best_action_for_node = action
+                
+                alpha = max(alpha, score)
+                if alpha >= beta:
+                    break
+            
+            flag = self.EXACT_FLAG
+            if max_score <= original_alpha:
+                flag = self.UPPERBOUND_FLAG
+            elif max_score >= beta:
+                flag = self.LOWERBOUND_FLAG
+            
+            self.transposition[key] = (max_score, depth, flag, 0, best_action_for_node)
+            return max_score, pos
+        
+        else:
+            min_score = 1e9
+            for action in legal_actions:
+                board.perform_move(action)
+                score, new_pos = self.minimax(board, depth - 1, alpha, beta, True)
+                board.undo()
+
+                pos += new_pos
+                if score < min_score:
+                    min_score = score
+                    best_action_for_node = action
+                
+                beta = min(beta, score)
+                if alpha >= beta:
+                    break
+            
+            flag = self.EXACT_FLAG
+            if min_score >= original_beta:
+                flag = self.LOWERBOUND_FLAG
+            elif min_score <= alpha:
+                flag = self.UPPERBOUND_FLAG
+            
+            self.transposition[key] = (min_score, depth, flag, 0, best_action_for_node)
+            return min_score, pos
+
+    def iterative_deepening(self, board: LightweightBoardHandler, max_time: int):
+        best_action = None
+        best_score = -1e9
+        total_pos = 0
+        current_depth = 1
+        self.start_time = time.time()
+        self.elapsed = 0
+        
+        self.transposition.clear()
+        
+        while self.elapsed < max_time:
+            if board.winner is not None or board.draw:
+                break
+
+            self.current_iteration_depth = current_depth
+            
+            if self.verbose:
+                print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Searching depth {current_depth}...")
+            
+            depth_best_action = None
+            depth_best_score = -1e9
+            pos = 0
+            
+            legal_actions = board.get_legal_actions()
+            
+            if current_depth > 1:
+                legal_actions = self._order_moves(board, legal_actions, current_depth)
+            else:
+                move_scores = self._get_move_scores(board)
+                legal_actions.sort(key=lambda m: move_scores.get(m, 0), reverse=True)
+            
+            for action in legal_actions:
+                board.perform_move(action)
+                score, new_pos = self.minimax(board, current_depth - 1, -1e9, 1e9, False)
+                board.undo()
+                
+                pos += new_pos
+                if score > depth_best_score:
+                    depth_best_score = score
+                    depth_best_action = action
+                
+                if score == self.W_WIN:
+                    break
+            
+            total_pos += pos
+            best_action = depth_best_action
+            best_score = depth_best_score
+            
+            self.best_moves_history[board.hash] = best_action
+            
+            if self.verbose:
+                print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Depth {current_depth}: Best move {best_action} with score {best_score} ({pos} positions)")
+            
+            if best_score >= self.W_WIN * 0.9:
+                if self.verbose:
+                    print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Winning move found!")
+                break
+
+            if best_score <= -self.W_WIN * 0.9:
+                if self.verbose:
+                    print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Winning not possible :(")
+                break
+
+            current_depth += 1
+            self.elapsed = time.time() - self.start_time
+        
+        return best_action, total_pos
+
+    # def get_best_action(self, board: Board, max_time: int):
+    #     pos = 0
+    #     best_score = -1e9
+    #     best_action = None
+
+    #     self.transposition.clear()
+    #     # print(f"Legal Actions: {board.legal_actions}")
+    #     # self.print_point_dict(board.libertydict)
+    #     self.light_board = LightweightBoardHandler(board)
+    #     legal_actions = self.light_board.get_legal_actions()
+    #     for action in legal_actions:   
+    #         # print("STORED_______________________")
+    #         # for key,val in snap.libertydict['BLACK'].items(): 
+    #         #     print(key , val)
+        
+    #         # for key,val in snap.libertydict['WHITE'].items(): 
+    #         #     print(key , val)
+    #         # print()
+
+    #         self.light_board.perform_move(action)
+    #         # print(self.light_board.parent)
+    #         # successor = board.copy()
+    #         # successor.put_stone(action, check_legal=False)
+    #         # score, new_pos = self.minimax(successor, depth, maximizing_player=False)
+    #         # self.print_point_dict(board.libertydict)
+    #         score, new_pos = self.minimax(self.light_board, depth, alpha=-1e9, beta=1e9, maximizing_player=False)
+    #         if(self.verbose):
+    #             # self.light_board.perform_move(self.light_board.get_legal_actions()[0])
+    #             print(action, score)         
+    #             # self.light_board.undo()
+    #         pos += new_pos
+    #         if(score > best_score):
+    #             best_score = score
+    #             best_action = action
+            
+    #         if(score == self.W_WIN):
+    #             break
+    #         self.light_board.undo()
+    #         # print("RESTORED: ")
+    #         # print(self.light_board.board)
+    #     # print("---------------------------------------------------------------------------")
+    #     return best_action, pos
+
+    # def print_point_dict(self, point_dict:PointDict):
+    #     for key,val in point_dict.d['BLACK'].items(): 
+    #         print(key , val)
+        
+    #     for key,val in point_dict.d['WHITE'].items(): 
+    #         print(key , val)
+    #     print()
+
+    def get_action(self, board: Board):
+        """Returns the best action using iterative deepening."""
+        start_time = time.time()
+        actions = board.legal_actions
+        
+        if not actions:
+            return None
+        
+        self.best_moves_history.clear()
+        
+        self.light_board = LightweightBoardHandler(board)
+        
+        best_action, pos = self.iterative_deepening(self.light_board, self.MAX_TIME)
+        
+        elapsed = time.time() - start_time
+        
+        if self.verbose:
+            print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Total possibilities considered: {pos}")
+            print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Best Move: {best_action}")
+            print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Decision Time: {elapsed:.2f}s ({pos/elapsed:.0f} pos/sec)")
+        
+        if elapsed > 18:
+            print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] !!! Took too much time: {elapsed:.2f}s ({pos/elapsed:.0f} pos/sec)")
+            print(f"[{'BLACK' if self.color == 1 else 'WHITE'}] Possibilities considered: {pos}")
+        
+        return best_action
 
 class Agent1v4:
     """A class to generate a random action for a Go board."""
@@ -335,16 +1095,9 @@ class Agent1v4:
             # print()
 
             self.light_board.perform_move(action)
-            # print(self.light_board.parent)
-            # successor = board.copy()
-            # successor.put_stone(action, check_legal=False)
-            # score, new_pos = self.minimax(successor, depth, maximizing_player=False)
-            # self.print_point_dict(board.libertydict)
             score, new_pos = self.minimax(self.light_board, depth, alpha=-1e9, beta=1e9, maximizing_player=False)
             if(self.verbose):
-                # self.light_board.perform_move(self.light_board.get_legal_actions()[0])
                 print(action, score)         
-                # self.light_board.undo()
             pos += new_pos
             if(score > best_score):
                 best_score = score
@@ -353,9 +1106,6 @@ class Agent1v4:
             if(score == self.W_WIN):
                 break
             self.light_board.undo()
-            # print("RESTORED: ")
-            # print(self.light_board.board)
-        # print("---------------------------------------------------------------------------")
         return best_action, pos
 
     def print_point_dict(self, point_dict:PointDict):

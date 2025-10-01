@@ -3,7 +3,7 @@ from game.go import Board, opponent_color
 from game.ui import UI
 import pygame
 import time
-from group1 import Agent1v4, Agent1v3, Agent1v2, Agent1v1
+from group1 import Agent1v6, Agent1v5, Agent1v4, Agent1v3, Agent1v2, Agent1v1
 from group2 import Agent2
 from os.path import join
 from argparse import ArgumentParser
@@ -55,6 +55,7 @@ class Match:
 
         # Take turns to play move
         while self.board.winner is None:
+            # time.sleep(1)
             if self.board.next == 'BLACK':
                 point = self.perform_one_move(self.agent_black)
             else:
@@ -142,15 +143,22 @@ class Match:
 
 def main():
 
-    SAMPLE_SIZE = 1
+    SAMPLE_SIZE = 10
     black_wins = 0
     white_wins = 0
     draws = 0
     for i in tqdm(range(SAMPLE_SIZE), desc="Progress: ", unit="matches"):
-        agent_white = Agent1v4('WHITE', max_depth=5)
-        agent_black = Agent1v4('BLACK', max_depth=7, verbose=True)
-
-        match = Match(agent_black=agent_black, agent_white=agent_white, gui=True, dir_save=None)
+        #agent_white = Agent1v5(color="WHITE", time_limit=10.0, verbose=True) #Agent1v4('WHITE', max_depth=5, verbose=True)
+        #agent_white = Agent1v4('WHITE', max_depth=7, verbose=True)
+        #agent_white = Agent1v6('WHITE', max_time=2, verbose=True)
+        agent_white = Agent2('WHITE')
+        #agent_black = Agent1v5(color="BLACK", time_limit=10.0, verbose=False) #Agent1v4('BLACK', max_depth=5)
+        #agent_black = Agent1v4('BLACK', max_depth=7, verbose=True)
+        agent_black = Agent1v6('BLACK', max_time=15, verbose=False)
+        #agent_black = Agent2('BLACK')
+        
+        dir_save = 'game/images'
+        match = Match(agent_black=agent_black, agent_white=agent_white, gui=True, dir_save=dir_save)
 
         match.start()
 
