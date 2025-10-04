@@ -141,7 +141,7 @@ class Match:
 def main():
 
     agent_black = Agent1('black')
-    agent_white = None # Agent2('white')
+    agent_white = Agent2('white')
 
     print('Agent for BLACK: ' + (str(agent_black) if agent_black else 'Human'))
     print('Agent for WHITE: ' + (str(agent_white) if agent_white else 'Human'))

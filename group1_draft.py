@@ -299,19 +299,19 @@ class MCTS:
         move_scores = {}
         opponent = board.get_opponent(board.next)
 
-        # Priority 1: Capture moves (immediate win)
+        # Priority 1: Capture moves
         if board.endangered_groups[opponent]:
             for opp_root in board.endangered_groups[opponent]:
                 for liberty in board.group_data[opp_root]['liberties']:
-                    move_scores[liberty] = 100
+                    move_scores[liberty] = 1000
 
-        # Priority 2: Saving moves (prevent loss)
+        # Priority 2: Saving moves
         if board.endangered_groups[board.next]:
             for root in board.endangered_groups[board.next]:
                 for liberty in board.group_data[root]['liberties']:
                     if not board._is_suicide(liberty, board.next):
                         if liberty not in move_scores:
-                            move_scores[liberty] = 90
+                            move_scores[liberty] = 900
 
         # Priority 3: Threatening moves (reduce opponent to 2 liberties)
         for root, data in board.group_data.items():
@@ -319,14 +319,7 @@ class MCTS:
                 for liberty in data['liberties']:
                     if not board._is_suicide(liberty, board.next):
                         if liberty not in move_scores:
-                            move_scores[liberty] = 50
-        
-        # Priority 4: Center moves (better for Go strategy)
-        center = (BOARD_SIZE // 2, BOARD_SIZE // 2)
-        for move in board.get_legal_actions():
-            if move not in move_scores:
-                distance = abs(move[0] - center[0]) + abs(move[1] - center[1])
-                move_scores[move] = max(1, 20 - distance)  # Closer to center = higher score
+                            move_scores[liberty] = 500
         
         return move_scores
 
@@ -337,9 +330,9 @@ class MCTS:
             if child.n() == 0:
                 u = float('inf')
             else:
-                # FIXED: Proper UCT formula
-                exploit = child.q() / child.n()  # Average reward
-                explore = self.c * math.sqrt(math.log(node.n()) / child.n())
+                child_winrate = child.q() / child.n()
+                exploit = 1.0 - child_winrate
+                explore = self.c * math.sqrt(math.log(node.n() + 1) / child.n())
                 u = exploit + explore
             
             if u > best_val:
@@ -360,15 +353,14 @@ class MCTS:
             
         move_scores = self._get_move_scores(board)
         
-        # First check for high-priority moves (capture/save)
+        # First check for high-priority moves
         for move in moves:
-            if move_scores.get(move, 0) >= 90:  # Capture or save moves
+            if move_scores.get(move, 0) >= 900:  # Capture or save
                 return move
         
-        # For other moves, use weighted random selection
-        weights = [max(1, move_scores.get(m, 1)) for m in moves]
+        # Otherwise, use weighted random selection
+        weights = [move_scores.get(m, 1) for m in moves]
         total = sum(weights)
-        
         if total == 0:
             return self.rng.choice(moves)
         
@@ -413,10 +405,9 @@ class MCTS:
         return reward, steps
 
     def _expand(self, node: MCTSNode, board: LightweightBoardHandler):
+
         if node.untried_moves is None:
             moves = board.get_legal_actions()
-            if not moves:
-                return None
             move_scores = self._get_move_scores(board)
             moves.sort(key=lambda m: move_scores.get(m, 0), reverse=True)
             node.untried_moves = moves
@@ -1093,13 +1084,20 @@ class Agent1v4:
             max_score = -1e9
             for action in legal_actions:
                 board.perform_move(action)
+                # print(board.parent)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, False)
                 score, new_pos = self.minimax(board, depth-1, alpha, beta, False)
                 max_score = max(max_score, score)
                 alpha = max(alpha, score)
                 pos += new_pos
-                board.undo()
                 if(beta <= alpha): 
+                    board.undo()
                     break
+                board.undo()
+                # print("RESTORED: ")
+                # print(self.light_board.board)
                 
             self.transposition[key] = (max_score, pos)
             return max_score, pos
@@ -1108,13 +1106,20 @@ class Agent1v4:
             min_score = 1e9
             for action in legal_actions:
                 board.perform_move(action)
+                # print(board.parent)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, True)
                 score, new_pos = self.minimax(board, depth-1, alpha, beta, True)
                 min_score = min(min_score, score)
                 beta = min(beta, score)
                 pos += new_pos
-                board.undo()
                 if(beta <= alpha): 
+                    board.undo()
                     break
+                board.undo()
+                # print("RESTORED: ")
+                # print(self.light_board.board)
             self.transposition[key] = (min_score, pos)
             return min_score, pos
 
@@ -1204,19 +1209,11 @@ class Agent1v3:
         if(board.winner is not None):
             if(board.winner == self.color): return self.W_WIN
             else: return -self.W_WIN
-        
-        # Standardized evaluation function
-        own_atari = len(board.endangered_groups[self.color])
-        opp_atari = len(board.endangered_groups[self.opponent_color])
-        own_libs = len(board.possible_actions[self.color])
-        opp_libs = len(board.possible_actions[self.opponent_color])
-        
-        score = self.W_ATARI * (opp_atari - own_atari)
-        score += self.W_LIBERTIES * (own_libs - opp_libs)
-        
+        score = 0
+        score += self.W_LIBERTIES * (len(board.possible_actions[self.opponent_color]) - len(board.possible_actions[self.color]))
         return score
 
-    def minimax(self, board: LightweightBoardHandler, depth: int, alpha: int, beta: int, maximizing_player: bool) -> int:  
+    def minimax(self, board: LightweightBoardHandler, depth: int, maximizing_player: bool) -> int:  
         # color_idx = 0 if board.next == 'BLACK' else 1
         key = (board.hash, board.next)
         
@@ -1235,13 +1232,16 @@ class Agent1v3:
             max_score = -1e9
             for action in board.get_legal_actions():
                 board.perform_move(action)
-                score, new_pos = self.minimax(board, depth-1, alpha, beta, False)
+                # print(board.parent)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, False)
+                score, new_pos = self.minimax(board, depth-1, False)
                 max_score = max(max_score, score)
-                alpha = max(alpha, score)
                 pos += new_pos
                 board.undo()
-                if beta <= alpha:
-                    break
+                # print("RESTORED: ")
+                # print(self.light_board.board)
                 
             self.transposition[key] = (max_score, pos)
             return max_score, pos
@@ -1250,13 +1250,16 @@ class Agent1v3:
             min_score = 1e9
             for action in board.get_legal_actions():
                 board.perform_move(action)
-                score, new_pos = self.minimax(board, depth-1, alpha, beta, True)
+                # print(board.parent)
+                # successor = board.copy()
+                # successor.put_stone(action, check_legal=False)
+                # score, new_pos = self.minimax(successor, depth-1, True)
+                score, new_pos = self.minimax(board, depth-1, True)
                 min_score = min(min_score, score)
-                beta = min(beta, score)
                 pos += new_pos
                 board.undo()
-                if beta <= alpha:
-                    break
+                # print("RESTORED: ")
+                # print(self.light_board.board)
             self.transposition[key] = (min_score, pos)
             return min_score, pos
 
@@ -1280,13 +1283,20 @@ class Agent1v3:
             # print()
 
             self.light_board.perform_move(action)
-            score, new_pos = self.minimax(self.light_board, depth, -1e9, 1e9, False)
+            # print(self.light_board.parent)
+            # successor = board.copy()
+            # successor.put_stone(action, check_legal=False)
+            # score, new_pos = self.minimax(successor, depth, maximizing_player=False)
+            # self.print_point_dict(board.libertydict)
+            score, new_pos = self.minimax(self.light_board, depth, maximizing_player=False)
             pos += new_pos
             if(score > best_score):
                 best_score = score
                 best_action = action
             
             self.light_board.undo()
+            # print("RESTORED: ")
+            # print(self.light_board.board)
 
         return best_action, pos
 
@@ -1435,24 +1445,8 @@ class Agent1v2:
         if(board.winner is not None):
             if(board.winner == self.color): return self.W_WIN
             else: return -self.W_WIN
-        
-        # Use consistent evaluation with other agents
-        own_libs = len(board.libertydict.d[self.color])
-        opp_libs = len(board.libertydict.d[self.opponent_color])
-        
-        # Count endangered groups (atari)
-        own_atari = 0
-        opp_atari = 0
-        for group in board.groups[self.color]:
-            if len(group.liberties) == 1:
-                own_atari += 1
-        for group in board.groups[self.opponent_color]:
-            if len(group.liberties) == 1:
-                opp_atari += 1
-        
-        score = self.W_ATARI * (opp_atari - own_atari)
-        score += self.W_LIBERTIES * (own_libs - opp_libs)
-        
+        score = 0
+        score += self.W_LIBERTIES * (len(board.libertydict.d[self.color]) - len(board.libertydict.d[self.opponent_color]))
         return score
 
     def minimax(self, board: Board, depth: int, maximizing_player: bool, hash: int) -> int:  
@@ -1601,24 +1595,8 @@ class Agent1v1:
         if(board.winner is not None):
             if(board.winner == self.color): return self.W_WIN
             else: return -self.W_WIN
-        
-        # Use consistent evaluation with other agents
-        own_libs = len(board.libertydict.d[self.color])
-        opp_libs = len(board.libertydict.d[self.opponent_color])
-        
-        # Count endangered groups (atari)
-        own_atari = 0
-        opp_atari = 0
-        for group in board.groups[self.color]:
-            if len(group.liberties) == 1:
-                own_atari += 1
-        for group in board.groups[self.opponent_color]:
-            if len(group.liberties) == 1:
-                opp_atari += 1
-        
-        score = self.W_ATARI * (opp_atari - own_atari)
-        score += self.W_LIBERTIES * (own_libs - opp_libs)
-        
+        score = 0
+        score += self.W_LIBERTIES * (len(board.libertydict.d[self.color]) - len(board.libertydict.d[self.opponent_color]))
         return score
 
     def minimax(self, board: Board, depth: int, maximizing_player: bool) -> int:  
