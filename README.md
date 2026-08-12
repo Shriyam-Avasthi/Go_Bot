@@ -2,6 +2,8 @@
 
 A Python-based implementation of a simplified Go game featuring multiple AI agents with increasing sophistication. This project demonstrates various game-playing algorithms including minimax with alpha-beta pruning, Monte Carlo Tree Search (MCTS), and iterative deepening search.
 
+<img src="img/Board.jpg" alt="Go Board" width="450" align="center"/>
+
 ## Overview
 
 This is a streamlined version of Go with simplified rules and winning conditions, implemented with a GUI for human play and multiple AI agent implementations for competitive play. The project serves as a testbed for exploring different game-tree search algorithms and move evaluation strategies.
